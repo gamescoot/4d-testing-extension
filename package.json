@@ -1,7 +1,7 @@
 {
-  "name": "test-provider-sample",
-  "displayName": "Test Provider Sample",
-  "description": "VS Code test provider sample for 4D tests",
+  "name": "4d-testing-extension",
+  "displayName": "4D Testing Extension",
+  "description": "VS Code 4D Testing Extension",
   "repository": {"type": "git","url":"https://github.com/gamescoot/4d-testing-extension"},
   "publisher": "ScottHarris",
   "version": "0.0.1",
@@ -15,8 +15,8 @@
   "contributes": {
     "commands": [
       {
-        "command": "test-provider-sample.runTests",
-        "title": "Test-Provider-Sample: Run Tests"
+        "command": "4d-testing-extension.runTests",
+        "title": "4d-testing-extension: Run Tests"
       }
     ]
   },
