@@ -1,26 +1,9 @@
-# Test Provider Sample
+# 4D Testing Extension
+A unit testing extension for use with https://github.com/KyleKincer/testing
 
-This sample demonstrates usage of the Test Provider API. It looks for tests as additions in `.md` files, with heading as groups, for example:
+You need to have tests already set up for this to discover them so check out Kyle's repository on how to set up tests.
+To use, install the extension, open a test file and hit play on a test.
 
-```
-# Easy Math
+This extension will discover tests and add a beaker icon to your sidebar. Click that to view the tests it discovered and play from there.
 
-2 + 2 = 4 // this test will pass
-2 + 2 = 5 // this test will fail
-
-# Harder Math
-
-230230 + 5819123 = 6049353
-```
-
-## VS Code API
-
-todo
-
-## Running the Sample
-
-- Run `npm install` in terminal to install dependencies
-- Run the `Run Extension` target in the Debug View. This will:
-	- Start a task `npm: watch` to compile the code
-	- Run the extension in a new VS Code window
-- Create a `test.md` file containing the given content
+Tags are integrated where you can run your tags as a run profile in the testing tab and you can search for them in the filter as well.
