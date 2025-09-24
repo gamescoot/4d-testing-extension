@@ -2,6 +2,7 @@
   "name": "test-provider-sample",
   "displayName": "Test Provider Sample",
   "description": "VS Code test provider sample for 4D tests",
+  "repository": {"type": "git","url":"https://github.com/gamescoot/4d-testing-extension"},
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.85.0"
