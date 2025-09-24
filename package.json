@@ -4,7 +4,7 @@
   "description": "VS Code 4D Testing Extension",
   "repository": {"type": "git","url":"https://github.com/gamescoot/4d-testing-extension"},
   "publisher": "ScottHarris",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "engines": {
     "vscode": "^1.85.0"
   },
