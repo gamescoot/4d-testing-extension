@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 
 const testRe = /^.*\.assert\.(.*)\(.+?;(.+?);(.*?);* "(.+)"\)$/;
-const headingRe = /^.*\/\/ #tags: (.*)\nFunction (test_.*)\(.*$/;
+const headingRe = /^.*?(?:\/\/ #tags: (.*))?\nFunction (test_.*)\(.*$/;
 
 export const parseMarkdown = (
     text: string,
@@ -47,9 +47,9 @@ export const parseMarkdown = (
         lastline = line;
 
         if (heading) {
-            const [, tagsString, name] = heading;
+            var [, tagsString, name] = heading;
             foundFunction = true;
-
+            tagsString = tagsString ? tagsString : "unit"
             const depth = tagsString ? tagsString.split(':').length : 1;
             const headingTags = tagsString ? tagsString.split(',').map(t => t.trim()) : [];
 
