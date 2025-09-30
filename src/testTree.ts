@@ -80,7 +80,7 @@ export async function updateFromDisk(
                     should,
                     thisGeneration
                 );
-                const id = `${fileItem.uri}/${data.getLabel()}`;
+                const id = `${parent.item.id}/${range.start.line}`;
                 const tcase = controller.createTestItem(id, data.getLabel(), fileItem.uri);
                 tcase.range = range;
                 testData.set(tcase, data);
