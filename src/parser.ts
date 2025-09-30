@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 
-const testRe = /^.*\.assert\.(.*)\(.+?;(.+?);(.*?);* "(.+)"\)$/;
+const testRe = /^.*\.assert\.(.*)\((.+?);(.+?);[^"]*"([^"]*)"\)$/;
 const headingRe = /^.*?(?:\/\/ #tags: (.*))?\nFunction (test_.*)\(.*$/;
 
 export const parseMarkdown = (
