@@ -99,7 +99,18 @@ export async function startTestRun(
             makeProcess.on('close', () => {
                 try {
                     if (output.trim().length > 0) {
-                        const results = JSON.parse(output);
+                        // Extract JSON from output - find first { and last }
+                        const firstBrace = output.indexOf('{');
+                        const lastBrace = output.lastIndexOf('}');
+
+                        if (firstBrace === -1 || lastBrace === -1 || firstBrace > lastBrace) {
+                            run.appendOutput(`Could not find valid JSON in output\n`);
+                            resolve();
+                            return;
+                        }
+
+                        const jsonStr = output.substring(firstBrace, lastBrace + 1);
+                        const results = JSON.parse(jsonStr);
 
                         // Pretty JSON, fixed header
                         const pretty = JSON.stringify(results, null, 2);
@@ -112,6 +123,7 @@ export async function startTestRun(
                     }
                 } catch (err: any) {
                     run.appendOutput(`Error parsing JSON: ${err.message}\n`);
+                    run.appendOutput(`Output was:\n${output}\n`);
                 }
                 resolve();
             });
