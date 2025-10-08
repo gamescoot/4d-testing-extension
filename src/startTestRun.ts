@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { spawn } from 'child_process';
+import { mapFunctionLineToSourceLine } from './parser';
 
 export async function startTestRun(
     controller: vscode.TestController,
@@ -89,7 +90,7 @@ export async function startTestRun(
                 run.appendOutput(data.toString());
             });
 
-            makeProcess.on('close', () => {
+            makeProcess.on('close', async () => {
                 try {
                     if (output.trim().length > 0) {
                         // Extract JSON from output - find first { and last }
@@ -112,7 +113,7 @@ export async function startTestRun(
 
                         run.appendOutput("\n" + normalized + "\n");
 
-                        handleResults(results, run, testTargets);
+                        await handleResults(results, run, testTargets, controller);
                     }
                 } catch (err: any) {
                     run.appendOutput(`Error parsing JSON: ${err.message}\n`);
@@ -126,10 +127,11 @@ export async function startTestRun(
     run.end();
 }
 
-function handleResults(
+async function handleResults(
     results: any,
     run: vscode.TestRun,
-    testTargets: { suite: string; func: string; item: vscode.TestItem }[]
+    testTargets: { suite: string; func: string; item: vscode.TestItem }[],
+    controller: vscode.TestController
 ) {
     if (!results.testResults) return;
 
@@ -148,45 +150,88 @@ function handleResults(
 
         const funcItem = target.item;
 
-        // Check if test passed or failed
+        // Clear any existing assertion children from previous runs
+        const assertionItems: vscode.TestItem[] = [];
+
+        // Create a TestItem for each assertion
+        if (testResult.assertions && testResult.assertions.length > 0) {
+            for (let index = 0; index < testResult.assertions.length; index++) {
+                const assertion = testResult.assertions[index];
+
+                // Use the assertion message as the label for the test tree
+                let label = assertion.message || `Assertion ${index + 1}`;
+
+                // Truncate if too long
+                if (label.length > 80) {
+                    label = label.substring(0, 77) + '...';
+                }
+
+                // Create the assertion test item
+                const assertionId = `${funcItem.id}/assertion-${index}`;
+                const assertionItem = controller.createTestItem(assertionId, label, funcItem.uri);
+
+                // Map the line number to get the exact location
+                if (assertion.line && assertion.functionName && funcItem.uri) {
+                    const sourceLine = await mapFunctionLineToSourceLine(
+                        funcItem.uri,
+                        assertion.functionName,
+                        assertion.line
+                    );
+
+                    if (sourceLine !== null) {
+                        const position = new vscode.Position(sourceLine, 0);
+                        const range = new vscode.Range(position, position);
+                        assertionItem.range = range;
+                    }
+                }
+
+                // Add to the function's children
+                assertionItems.push(assertionItem);
+
+                // Mark the assertion as started
+                run.started(assertionItem);
+
+                // Mark as passed or failed
+                if (assertion.passed) {
+                    run.passed(assertionItem);
+                } else {
+                    // Build detailed failure message for this assertion
+                    // Show both expected and actual on first line for inline flag
+                    const expectedStr = JSON.stringify(assertion.expected);
+                    const actualStr = JSON.stringify(assertion.actual);
+                    const failureLines: string[] = [
+                        `Expected: ${expectedStr}, Actual: ${actualStr}`
+                    ];
+
+                    // Add the original assertion message if available
+                    if (assertion.message) {
+                        failureLines.push(`\nAssertion: ${assertion.message}`);
+                    }
+
+                    const message = new vscode.TestMessage(failureLines.join('\n'));
+
+                    // Set location if we have it
+                    if (assertionItem.range && funcItem.uri) {
+                        message.location = new vscode.Location(funcItem.uri, assertionItem.range);
+                    }
+
+                    run.failed(assertionItem, message);
+                }
+            }
+        }
+
+        // Replace the function's children with the new assertion items
+        funcItem.children.replace(assertionItems);
+
+        // Mark the parent function based on overall result
         if (testResult.passed) {
             run.passed(funcItem, testResult.duration ?? 0);
         } else {
-            // Build failure message with all relevant details
-            const failureLines: string[] = [];
+            // Build a summary message for the parent function
+            const failedCount = testResult.assertions.filter((a: any) => !a.passed).length;
+            const summaryMessage = `${failedCount} of ${testResult.assertionCount} assertions failed`;
 
-            // Add failure reason from results.failures (includes subtest name for table-driven tests)
-            if (results.failures) {
-                const failure = results.failures.find(
-                    (f: any) => f.suite === testResult.suite && f.test === testResult.name
-                );
-                if (failure && failure.reason) {
-                    failureLines.push(`Failed: ${failure.reason}\n`);
-                }
-            }
-
-            // Add details of failed assertions
-            const failedAssertions = testResult.assertions.filter((a: any) => !a.passed);
-            if (failedAssertions.length > 0) {
-                failureLines.push(`\nFailed assertions (${failedAssertions.length}):\n`);
-                failedAssertions.forEach((assertion: any, index: number) => {
-                    failureLines.push(`\n[${index + 1}] ${assertion.message || '(no message)'}`);
-                    failureLines.push(`  Expected: ${JSON.stringify(assertion.expected)}`);
-                    failureLines.push(`  Actual: ${JSON.stringify(assertion.actual)}`);
-                    if (assertion.line) {
-                        failureLines.push(`  Line: ${assertion.line}`);
-                    }
-                });
-            }
-
-            // Add summary of all assertions
-            failureLines.push(
-                `\n\nSummary: ${testResult.assertionCount} assertions ` +
-                `(${testResult.assertions.filter((a: any) => a.passed).length} passed, ` +
-                `${failedAssertions.length} failed)`
-            );
-
-            run.failed(funcItem, new vscode.TestMessage(failureLines.join('\n')), testResult.duration ?? 0);
+            run.failed(funcItem, new vscode.TestMessage(summaryMessage), testResult.duration ?? 0);
         }
     }
 }
