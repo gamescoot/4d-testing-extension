@@ -135,6 +135,31 @@ Function test_SimpleTest($t : cs.Testing.Testing)
         assert.ok(foundTags.length >= 0, 'Should have tags array');
     });
 
+    test('Should parse function with no tags comment', () => {
+        // When no tags comment is present, function gets default "unit" tag
+        const content = `Class constructor
+    // Some regular comment
+Function test_NoTags($t : cs.Testing.Testing)
+    $t.assert.isTrue($t; $result; "Result should be true")
+`;
+
+        let foundTags: string[] = [];
+        let foundHeadings = 0;
+
+        const result = parseMarkdown(content, {
+            onHeading: (range, name, depth, headingTags) => {
+                foundTags = headingTags;
+                foundHeadings++;
+            },
+            onTest: () => {}
+        });
+
+        assert.ok(result, 'parseMarkdown should return true when function found');
+        assert.strictEqual(foundHeadings, 1, 'Should find one heading');
+        assert.strictEqual(foundTags.length, 1, 'Should have default unit tag');
+        assert.strictEqual(foundTags[0], 'unit', 'Default tag should be unit');
+    });
+
     test('Should parse areEqual assertions correctly', () => {
         const content = `
     // #tags: unit
