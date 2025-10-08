@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import { spawn } from 'child_process';
-import { testData, TestCase } from './testTree';
 
 export async function startTestRun(
     controller: vscode.TestController,
@@ -28,30 +27,24 @@ export async function startTestRun(
         vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
 
     // Collect class + function combos to run
-    const testTargets: { suite: string; func: string }[] = [];
+    const testTargets: { suite: string; func: string; item: vscode.TestItem }[] = [];
 
     while (queue.length > 0 && !token.isCancellationRequested) {
         const test = queue.pop()!;
-        const data = testData.get(test);
 
-        if (data instanceof TestCase) {
-            // Start test immediately
+        // If this is a test function (starts with test_), track it
+        if (test.label?.startsWith('test_')) {
             run.started(test);
 
             const fileName = test.uri?.path.split('/').pop() ?? '';
             const suite = fileName.replace(/\.4dm$/, '');
-            const parent = test.parent;
-            const func = parent?.label ?? '';
+            const func = test.label;
 
-            testTargets.push({ suite, func });
+            testTargets.push({ suite, func, item: test });
         }
 
-        // Recursively start children immediately
+        // Recursively process children
         test.children.forEach(child => {
-            const childData = testData.get(child);
-            if (childData instanceof TestCase) {
-                run.started(child);
-            }
             queue.push(child);
         });
     }
@@ -119,7 +112,7 @@ export async function startTestRun(
 
                         run.appendOutput("\n" + normalized + "\n");
 
-                        handleResults(results, run, controller);
+                        handleResults(results, run, testTargets);
                     }
                 } catch (err: any) {
                     run.appendOutput(`Error parsing JSON: ${err.message}\n`);
@@ -133,42 +126,67 @@ export async function startTestRun(
     run.end();
 }
 
-function handleResults(results: any, run: vscode.TestRun, controller: vscode.TestController) {
+function handleResults(
+    results: any,
+    run: vscode.TestRun,
+    testTargets: { suite: string; func: string; item: vscode.TestItem }[]
+) {
     if (!results.testResults) return;
 
-    for (const suiteResult of results.testResults) {
-        const classItem = controller.items.get(
-            vscode.workspace.workspaceFolders?.[0]?.uri.fsPath +
-            '/Project/Sources/Classes/' +
-            suiteResult.suite +
-            '.4dm'
+    for (const testResult of results.testResults) {
+        // Find the TestItem for this test function
+        const target = testTargets.find(
+            t => t.suite === testResult.suite && t.func === testResult.name
         );
-        if (!classItem) continue;
 
-        // Find the function heading
-        const funcItem = [...classItem.children].find(([_, t]) => t.label === suiteResult.name)?.[1];
-        if (!funcItem) continue;
+        if (!target) {
+            run.appendOutput(
+                `Warning: Could not find TestItem for ${testResult.suite}.${testResult.name}\n`
+            );
+            continue;
+        }
 
-        for (const assertion of suiteResult.assertions) {
-            const testCase = [...funcItem.children].find(([_, tc]) => {
-                const data = testData.get(tc);
-                return data instanceof TestCase && data.should === assertion.message;
-            })?.[1];
+        const funcItem = target.item;
 
-            if (!testCase) continue;
+        // Check if test passed or failed
+        if (testResult.passed) {
+            run.passed(funcItem, testResult.duration ?? 0);
+        } else {
+            // Build failure message with all relevant details
+            const failureLines: string[] = [];
 
-            run.started(testCase);
-            if (assertion.passed) {
-                run.passed(testCase, assertion.duration ?? 0);
-            } else {
-                run.failed(
-                    testCase,
-                    new vscode.TestMessage(
-                        `actual: ${assertion.actual} expected: ${assertion.expected}\n${assertion.message}`
-                    ),
-                    assertion.duration ?? 0
+            // Add failure reason from results.failures (includes subtest name for table-driven tests)
+            if (results.failures) {
+                const failure = results.failures.find(
+                    (f: any) => f.suite === testResult.suite && f.test === testResult.name
                 );
+                if (failure && failure.reason) {
+                    failureLines.push(`Failed: ${failure.reason}\n`);
+                }
             }
+
+            // Add details of failed assertions
+            const failedAssertions = testResult.assertions.filter((a: any) => !a.passed);
+            if (failedAssertions.length > 0) {
+                failureLines.push(`\nFailed assertions (${failedAssertions.length}):\n`);
+                failedAssertions.forEach((assertion: any, index: number) => {
+                    failureLines.push(`\n[${index + 1}] ${assertion.message || '(no message)'}`);
+                    failureLines.push(`  Expected: ${JSON.stringify(assertion.expected)}`);
+                    failureLines.push(`  Actual: ${JSON.stringify(assertion.actual)}`);
+                    if (assertion.line) {
+                        failureLines.push(`  Line: ${assertion.line}`);
+                    }
+                });
+            }
+
+            // Add summary of all assertions
+            failureLines.push(
+                `\n\nSummary: ${testResult.assertionCount} assertions ` +
+                `(${testResult.assertions.filter((a: any) => a.passed).length} passed, ` +
+                `${failedAssertions.length} failed)`
+            );
+
+            run.failed(funcItem, new vscode.TestMessage(failureLines.join('\n')), testResult.duration ?? 0);
         }
     }
 }
