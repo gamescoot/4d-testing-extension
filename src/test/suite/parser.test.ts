@@ -131,8 +131,8 @@ Function test_SimpleTest($t : cs.Testing.Testing)
 
         assert.ok(result, 'parseMarkdown should return true when function found');
         assert.strictEqual(foundHeadings, 1, 'Should find one heading');
-        // When tags are empty string after colon, split gives [''] not []
-        assert.ok(foundTags.length >= 0, 'Should have tags array');
+        assert.strictEqual(foundTags.length, 1, 'Should have default unit tag');
+        assert.strictEqual(foundTags[0], 'unit', 'Default tag should be unit');
     });
 
     test('Should parse function with no tags comment', () => {
