@@ -1,5 +1,4 @@
 import * as assert from 'assert';
-import * as vscode from 'vscode';
 import { parseMarkdown } from '../../parser';
 
 suite('Parser Test Suite', () => {
