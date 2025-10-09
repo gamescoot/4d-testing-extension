@@ -66,29 +66,6 @@ export async function updateFromDisk(
 
                 parent.children.push(thead);
                 ancestors.push({ item: thead, children: [] });
-            },
-
-            onTest: (range, actual, operator, expected, should) => {
-                const parent = ancestors[ancestors.length - 1];
-                if (!parent || !(parent.item.label?.startsWith('test_'))) return;
-
-                const data = new TestCase(
-                    fileItem.uri!.fsPath,
-                    actual,
-                    operator,
-                    expected,
-                    should,
-                    thisGeneration
-                );
-                const id = `${parent.item.id}/${range.start.line}`;
-                const tcase = controller.createTestItem(id, data.getLabel(), fileItem.uri);
-                tcase.range = range;
-                testData.set(tcase, data);
-
-                // Inherit tags from parent heading
-                tcase.tags = parent.item.tags;
-
-                parent.children.push(tcase);
             }
         });
 

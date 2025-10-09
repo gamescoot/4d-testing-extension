@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { spawn } from 'child_process';
-import { testData, TestCase } from './testTree';
+import { mapFunctionLineToSourceLine } from './parser';
 
 export async function startTestRun(
     controller: vscode.TestController,
@@ -28,30 +28,24 @@ export async function startTestRun(
         vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
 
     // Collect class + function combos to run
-    const testTargets: { suite: string; func: string }[] = [];
+    const testTargets: { suite: string; func: string; item: vscode.TestItem }[] = [];
 
     while (queue.length > 0 && !token.isCancellationRequested) {
         const test = queue.pop()!;
-        const data = testData.get(test);
 
-        if (data instanceof TestCase) {
-            // Start test immediately
+        // If this is a test function (starts with test_), track it
+        if (test.label?.startsWith('test_')) {
             run.started(test);
 
             const fileName = test.uri?.path.split('/').pop() ?? '';
             const suite = fileName.replace(/\.4dm$/, '');
-            const parent = test.parent;
-            const func = parent?.label ?? '';
+            const func = test.label;
 
-            testTargets.push({ suite, func });
+            testTargets.push({ suite, func, item: test });
         }
 
-        // Recursively start children immediately
+        // Recursively process children
         test.children.forEach(child => {
-            const childData = testData.get(child);
-            if (childData instanceof TestCase) {
-                run.started(child);
-            }
             queue.push(child);
         });
     }
@@ -96,7 +90,7 @@ export async function startTestRun(
                 run.appendOutput(data.toString());
             });
 
-            makeProcess.on('close', () => {
+            makeProcess.on('close', async () => {
                 try {
                     if (output.trim().length > 0) {
                         // Extract JSON from output - find first { and last }
@@ -119,7 +113,7 @@ export async function startTestRun(
 
                         run.appendOutput("\n" + normalized + "\n");
 
-                        handleResults(results, run, controller);
+                        await handleResults(results, run, testTargets, controller);
                     }
                 } catch (err: any) {
                     run.appendOutput(`Error parsing JSON: ${err.message}\n`);
@@ -133,42 +127,111 @@ export async function startTestRun(
     run.end();
 }
 
-function handleResults(results: any, run: vscode.TestRun, controller: vscode.TestController) {
+async function handleResults(
+    results: any,
+    run: vscode.TestRun,
+    testTargets: { suite: string; func: string; item: vscode.TestItem }[],
+    controller: vscode.TestController
+) {
     if (!results.testResults) return;
 
-    for (const suiteResult of results.testResults) {
-        const classItem = controller.items.get(
-            vscode.workspace.workspaceFolders?.[0]?.uri.fsPath +
-            '/Project/Sources/Classes/' +
-            suiteResult.suite +
-            '.4dm'
+    for (const testResult of results.testResults) {
+        // Find the TestItem for this test function
+        const target = testTargets.find(
+            t => t.suite === testResult.suite && t.func === testResult.name
         );
-        if (!classItem) continue;
 
-        // Find the function heading
-        const funcItem = [...classItem.children].find(([_, t]) => t.label === suiteResult.name)?.[1];
-        if (!funcItem) continue;
+        if (!target) {
+            run.appendOutput(
+                `Warning: Could not find TestItem for ${testResult.suite}.${testResult.name}\n`
+            );
+            continue;
+        }
 
-        for (const assertion of suiteResult.assertions) {
-            const testCase = [...funcItem.children].find(([_, tc]) => {
-                const data = testData.get(tc);
-                return data instanceof TestCase && data.should === assertion.message;
-            })?.[1];
+        const funcItem = target.item;
 
-            if (!testCase) continue;
+        // Clear any existing assertion children from previous runs
+        const assertionItems: vscode.TestItem[] = [];
 
-            run.started(testCase);
-            if (assertion.passed) {
-                run.passed(testCase, assertion.duration ?? 0);
-            } else {
-                run.failed(
-                    testCase,
-                    new vscode.TestMessage(
-                        `actual: ${assertion.actual} expected: ${assertion.expected}\n${assertion.message}`
-                    ),
-                    assertion.duration ?? 0
-                );
+        // Create a TestItem for each assertion
+        if (testResult.assertions && testResult.assertions.length > 0) {
+            for (let index = 0; index < testResult.assertions.length; index++) {
+                const assertion = testResult.assertions[index];
+
+                // Use the assertion message as the label for the test tree
+                let label = assertion.message || `Assertion ${index + 1}`;
+
+                // Truncate if too long
+                if (label.length > 80) {
+                    label = label.substring(0, 77) + '...';
+                }
+
+                // Create the assertion test item
+                const assertionId = `${funcItem.id}/assertion-${index}`;
+                const assertionItem = controller.createTestItem(assertionId, label, funcItem.uri);
+
+                // Map the line number to get the exact location
+                if (assertion.line && assertion.functionName && funcItem.uri) {
+                    const sourceLine = await mapFunctionLineToSourceLine(
+                        funcItem.uri,
+                        assertion.functionName,
+                        assertion.line
+                    );
+
+                    if (sourceLine !== null) {
+                        const position = new vscode.Position(sourceLine, 0);
+                        const range = new vscode.Range(position, position);
+                        assertionItem.range = range;
+                    }
+                }
+
+                // Add to the function's children
+                assertionItems.push(assertionItem);
+
+                // Mark the assertion as started
+                run.started(assertionItem);
+
+                // Mark as passed or failed
+                if (assertion.passed) {
+                    run.passed(assertionItem);
+                } else {
+                    // Build detailed failure message for this assertion
+                    // Show both expected and actual on first line for inline flag
+                    const expectedStr = JSON.stringify(assertion.expected);
+                    const actualStr = JSON.stringify(assertion.actual);
+                    const failureLines: string[] = [
+                        `Expected: ${expectedStr}, Actual: ${actualStr}`
+                    ];
+
+                    // Add the original assertion message if available
+                    if (assertion.message) {
+                        failureLines.push(`\nAssertion: ${assertion.message}`);
+                    }
+
+                    const message = new vscode.TestMessage(failureLines.join('\n'));
+
+                    // Set location if we have it
+                    if (assertionItem.range && funcItem.uri) {
+                        message.location = new vscode.Location(funcItem.uri, assertionItem.range);
+                    }
+
+                    run.failed(assertionItem, message);
+                }
             }
+        }
+
+        // Replace the function's children with the new assertion items
+        funcItem.children.replace(assertionItems);
+
+        // Mark the parent function based on overall result
+        if (testResult.passed) {
+            run.passed(funcItem, testResult.duration ?? 0);
+        } else {
+            // Build a summary message for the parent function
+            const failedCount = testResult.assertions.filter((a: any) => !a.passed).length;
+            const summaryMessage = `${failedCount} of ${testResult.assertionCount} assertions failed`;
+
+            run.failed(funcItem, new vscode.TestMessage(summaryMessage), testResult.duration ?? 0);
         }
     }
 }
