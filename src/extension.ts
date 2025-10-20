@@ -84,6 +84,14 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidChangeTextDocument(event => {
         discoverTests(controller, event.document.uri, getOrCreateTag);
     });
+
+    vscode.workspace.onDidCreateFiles(event => {
+        event.files.forEach(file => {
+            if (file.fsPath.endsWith('.4dm')) {
+                discoverTests(controller, file, getOrCreateTag);
+            }
+        });
+    });
 }
 
 // Discover all 4D test files

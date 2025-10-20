@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 
-const headingRe = /^.*?(?:\/\/ #tags: (.*))?\nFunction (test_.*)\(.*$/;
+const headingRe = /^.*?(?:\/\/ #tags: (.*))?\n?Function (test_.*)\(.*$/;
 
 export const parseMarkdown = (
     text: string,
