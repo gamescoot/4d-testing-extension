@@ -7,7 +7,7 @@
     "url": "https://github.com/gamescoot/4d-testing-extension"
   },
   "publisher": "ScottHarris",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "engines": {
     "vscode": "^1.85.0"
   },
