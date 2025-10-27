@@ -224,7 +224,9 @@ async function handleResults(
         funcItem.children.replace(assertionItems);
 
         // Mark the parent function based on overall result
-        if (testResult.passed) {
+        if (testResult.skipped) {
+            run.skipped(funcItem);
+        } else if (testResult.passed) {
             run.passed(funcItem, testResult.duration ?? 0);
         } else {
             // Build a summary message for the parent function
