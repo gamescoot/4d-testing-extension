@@ -2,20 +2,16 @@ name: Publish Extension
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - 'v*'
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -26,24 +22,22 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Compile extension
+      - name: Build extension
         run: npm run compile
 
-      - name: Install vsce
-        run: npm install -g @vscode/vsce
+      - name: Package extension
+        run: npx vsce package
 
-      - name: Bump version
-        id: version
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          npm version patch -m "Bump version to %s [skip ci]"
-          echo "new_version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
-
-      - name: Push version bump
-        run: git push --follow-tags
+      - name: Determine package name
+        id: package
+        run: echo "vsix=$(ls *.vsix)" >> $GITHUB_OUTPUT
 
       - name: Publish to VS Code Marketplace
-        run: vsce publish -p ${{ secrets.VSCE_PAT }}
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: npx vsce publish --packagePath "${{ steps.package.outputs.vsix }}" --pat "$VSCE_PAT"
+
+      - name: Publish to Open VSX
+        env:
+          OVSX_TOKEN: ${{ secrets.OPEN_VSX_TOKEN }}
+        run: npx ovsx publish "${{ steps.package.outputs.vsix }}" --pat "$OVSX_TOKEN"
