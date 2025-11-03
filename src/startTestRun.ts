@@ -10,6 +10,7 @@ export async function startTestRun(
     const run = controller.createTestRun(request);
 
     const queue: vscode.TestItem[] = [];
+    const isRunningAllTests = !request.include;
 
     if (request.include) {
         for (const test of request.include) {
@@ -62,7 +63,8 @@ export async function startTestRun(
         const profileTag = (request.profile?.label?.match(/Run '(.+)' tests/) || [])[1];
         if (profileTag) {
             cmdArgs.push(`tag=${profileTag}`);
-        } else {
+        } else if (!isRunningAllTests) {
+            // Only specify tests if not running all tests
             cmdArgs.push(`test=${uniqueTargets.join(',')}`);
         }
 
