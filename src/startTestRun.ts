@@ -137,8 +137,23 @@ async function handleResults(
 ) {
     if (!results.testResults) return;
 
+    if (results.hasGlobalErrors && results.globalErrors?.length > 0) {
+        run.appendOutput('\r\n⚠ Global Runtime Errors (outside test processes):\r\n');
+        for (const err of results.globalErrors) {
+            const code = err.code ?? '?';
+            const process = err.processNumber ?? '?';
+            const method = err.text || 'Unknown location';
+            const msg = err.message || err.method || '';
+            const line = err.line != null ? ` line ${err.line}` : '';
+            run.appendOutput(`  [${code}] Process ${process}: ${method}${line}\r\n`);
+            if (msg) {
+                run.appendOutput(`    ${msg}\r\n`);
+            }
+        }
+        run.appendOutput('\r\n');
+    }
+
     for (const testResult of results.testResults) {
-        // Find the TestItem for this test function
         const target = testTargets.find(
             t => t.suite === testResult.suite && t.func === testResult.name
         );
@@ -152,27 +167,27 @@ async function handleResults(
 
         const funcItem = target.item;
 
-        // Clear any existing assertion children from previous runs
+        // Pass 1: create assertion items and set their ranges
         const assertionItems: vscode.TestItem[] = [];
 
-        // Create a TestItem for each assertion
         if (testResult.assertions && testResult.assertions.length > 0) {
             for (let index = 0; index < testResult.assertions.length; index++) {
                 const assertion = testResult.assertions[index];
 
-                // Use the assertion message as the label for the test tree
-                let label = assertion.message || `Assertion ${index + 1}`;
+                let label: string;
+                if (assertion.isRuntimeError) {
+                    label = `⚠ ${assertion.message || 'Runtime error'}`;
+                } else {
+                    label = assertion.message || `Assertion ${index + 1}`;
+                }
 
-                // Truncate if too long
                 if (label.length > 80) {
                     label = label.substring(0, 77) + '...';
                 }
 
-                // Create the assertion test item
                 const assertionId = `${funcItem.id}/assertion-${index}`;
                 const assertionItem = controller.createTestItem(assertionId, label, funcItem.uri);
 
-                // Map the line number to get the exact location
                 if (assertion.line && assertion.functionName && funcItem.uri) {
                     const sourceLine = await mapFunctionLineToSourceLine(
                         funcItem.uri,
@@ -187,32 +202,46 @@ async function handleResults(
                     }
                 }
 
-                // Add to the function's children
-                assertionItems.push(assertionItem);
+                if (!assertionItem.range && funcItem.range) {
+                    assertionItem.range = funcItem.range;
+                }
 
-                // Mark the assertion as started
+                assertionItems.push(assertionItem);
+            }
+        }
+
+        // Attach items to the tree before setting run states
+        funcItem.children.replace(assertionItems);
+
+        // Pass 2: set run states now that items are in the tree
+        if (testResult.assertions && testResult.assertions.length > 0) {
+            for (let index = 0; index < testResult.assertions.length; index++) {
+                const assertion = testResult.assertions[index];
+                const assertionItem = assertionItems[index];
+
                 run.started(assertionItem);
 
-                // Mark as passed or failed
                 if (assertion.passed) {
                     run.passed(assertionItem);
                 } else {
-                    // Build detailed failure message for this assertion
-                    // Show both expected and actual on first line for inline flag
-                    const expectedStr = JSON.stringify(assertion.expected);
-                    const actualStr = JSON.stringify(assertion.actual);
-                    const failureLines: string[] = [
-                        `Expected: ${expectedStr}, Actual: ${actualStr}`
-                    ];
+                    const failureLines: string[] = [];
 
-                    // Add the original assertion message if available
-                    if (assertion.message) {
-                        failureLines.push(`\nAssertion: ${assertion.message}`);
+                    if (assertion.isRuntimeError) {
+                        failureLines.push(assertion.actual || 'Runtime error occurred');
+                        if (assertion.message) {
+                            failureLines.push(`\n${assertion.message}`);
+                        }
+                    } else {
+                        const expectedStr = JSON.stringify(assertion.expected);
+                        const actualStr = JSON.stringify(assertion.actual);
+                        failureLines.push(`Expected: ${expectedStr}, Actual: ${actualStr}`);
+                        if (assertion.message) {
+                            failureLines.push(`\nAssertion: ${assertion.message}`);
+                        }
                     }
 
                     const message = new vscode.TestMessage(failureLines.join('\n'));
 
-                    // Set location if we have it
                     if (assertionItem.range && funcItem.uri) {
                         message.location = new vscode.Location(funcItem.uri, assertionItem.range);
                     }
@@ -222,20 +251,47 @@ async function handleResults(
             }
         }
 
-        // Replace the function's children with the new assertion items
-        funcItem.children.replace(assertionItems);
-
-        // Mark the parent function based on overall result
         if (testResult.skipped) {
             run.skipped(funcItem);
         } else if (testResult.passed) {
             run.passed(funcItem, testResult.duration ?? 0);
         } else {
-            // Build a summary message for the parent function
-            const failedCount = testResult.assertions.filter((a: any) => !a.passed).length;
-            const summaryMessage = `${failedCount} of ${testResult.assertionCount} assertions failed`;
+            const summaryParts: string[] = [];
 
-            run.failed(funcItem, new vscode.TestMessage(summaryMessage), testResult.duration ?? 0);
+            if (testResult.runtimeErrors?.length > 0) {
+                const err = testResult.runtimeErrors[0];
+                const errMsg = err.message || err.method || `Error ${err.code}`;
+                summaryParts.push(`Runtime error: [${err.code}] ${errMsg}`);
+                if (err.text) {
+                    summaryParts.push(`Location: ${err.text}`);
+                }
+                if (err.line != null) {
+                    summaryParts.push(`Line: ${err.line}`);
+                }
+            } else {
+                const failedCount = testResult.assertions?.filter((a: any) => !a.passed).length ?? 0;
+                summaryParts.push(`${failedCount} of ${testResult.assertionCount} assertions failed`);
+            }
+
+            if (testResult.callChain?.length > 0) {
+                summaryParts.push('');
+                summaryParts.push('Call Stack:');
+                for (let i = 0; i < testResult.callChain.length; i++) {
+                    const frame = testResult.callChain[i];
+                    let frameLine = `  ${i + 1}. ${frame.name || '<unnamed>'}`;
+                    if (frame.type) { frameLine += ` (${frame.type})`; }
+                    if (frame.line != null) { frameLine += ` at line ${frame.line}`; }
+                    if (frame.database) { frameLine += ` in ${frame.database}`; }
+                    summaryParts.push(frameLine);
+                }
+            }
+
+            const summaryMsg = new vscode.TestMessage(summaryParts.join('\n'));
+            if (testResult.runtimeErrors?.length > 0) {
+                run.errored(funcItem, summaryMsg, testResult.duration ?? 0);
+            } else {
+                run.failed(funcItem, summaryMsg, testResult.duration ?? 0);
+            }
         }
     }
 }
