@@ -69,11 +69,13 @@ export async function mapFunctionLineToSourceLine(
         // Format is typically "ClassName.methodName" or just "methodName"
         const methodName = functionName.split('.').pop() || functionName;
 
-        // Find the function definition line
+        // Find the function definition line. Allow optional modifiers like
+        // `local` before the `Function` keyword (e.g., "local Function foo()").
         let functionStartLine = -1;
+        const escapedName = methodName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const funcRe = new RegExp(`^(?:\\w+\\s+)*Function\\s+${escapedName}\\s*\\(`);
         for (let i = 0; i < lines.length; i++) {
-            const line = lines[i].trim();
-            if (line.match(new RegExp(`^Function\\s+${methodName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\(`))) {
+            if (funcRe.test(lines[i].trim())) {
                 functionStartLine = i;
                 break;
             }
@@ -83,38 +85,87 @@ export async function mapFunctionLineToSourceLine(
             return null; // Function not found
         }
 
-        // Now count logical lines (4D lines) vs actual lines
-        // 4D counts lines ending with \ as part of the same logical line
-        // 4D treats the function declaration as line 0, so start from the next line
+        // Count logical lines (4D lines). Lines ending with `\` are continuations
+        // of the same logical line; we return the FIRST physical line of each
+        // logical line so the error lands at the start of the statement.
         let logicalLinesCompleted = 0;
+        let logicalLineStart = functionStartLine + 1;
         let lineIndex = functionStartLine + 1;
 
         while (lineIndex < lines.length) {
-            const currentLine = lines[lineIndex];
-
-            // Check if this line ends with a continuation character
-            // Note: We need to check for \ at the end, ignoring trailing whitespace
-            const trimmedLine = currentLine.trimEnd();
+            const trimmedLine = lines[lineIndex].trimEnd();
             const hasContinuation = trimmedLine.endsWith('\\');
 
             if (!hasContinuation) {
-                // End of a logical line
                 logicalLinesCompleted++;
-
-                // Check if this is the line we're looking for
                 if (logicalLinesCompleted === lineOffset) {
-                    return lineIndex; // Found it!
+                    return logicalLineStart;
                 }
+                logicalLineStart = lineIndex + 1;
             }
-
             lineIndex++;
         }
 
-        // Didn't find the target line
         return null;
 
     } catch (err) {
         console.error(`Error mapping function line to source line:`, err);
+        return null;
+    }
+}
+
+/**
+ * Maps a 4D project-method line number to the actual source file line number.
+ *
+ * Project methods don't have a `Function` declaration — the file body is the
+ * method. 4D skips a leading //%attributes directive and treats lines ending
+ * with `\` as continuations of a single logical line, so we mirror that here.
+ *
+ * @param fileUri - URI of the source file
+ * @param lineOffset - 1-based line number reported by 4D (relative to the start
+ *   of the method body, after any //%attributes)
+ * @returns The actual 0-based line number in the source file, or null on failure
+ */
+export async function mapProjectMethodLineToSourceLine(
+    fileUri: vscode.Uri,
+    lineOffset: number
+): Promise<number | null> {
+    try {
+        const rawContent = await vscode.workspace.fs.readFile(fileUri);
+        let content = new TextDecoder('utf-8').decode(rawContent);
+        if (content.charCodeAt(0) === 0xFEFF) {
+            content = content.slice(1);
+        }
+        const lines = content.split('\n');
+
+        // 4D skips a leading //%attributes line — start counting after it.
+        let startIndex = 0;
+        if (lines.length > 0 && lines[0].trimStart().startsWith('//%attributes')) {
+            startIndex = 1;
+        }
+
+        // Return the FIRST physical line of each logical line (so errors land at
+        // the start of multi-line statements joined with `\`).
+        let logicalLinesCompleted = 0;
+        let logicalLineStart = startIndex;
+        let lineIndex = startIndex;
+
+        while (lineIndex < lines.length) {
+            const trimmedLine = lines[lineIndex].trimEnd();
+            const hasContinuation = trimmedLine.endsWith('\\');
+
+            if (!hasContinuation) {
+                logicalLinesCompleted++;
+                if (logicalLinesCompleted === lineOffset) {
+                    return logicalLineStart;
+                }
+                logicalLineStart = lineIndex + 1;
+            }
+            lineIndex++;
+        }
+        return null;
+    } catch (err) {
+        console.error('Error mapping project method line to source line:', err);
         return null;
     }
 }
