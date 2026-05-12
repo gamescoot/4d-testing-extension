@@ -3,7 +3,7 @@ import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { mapFunctionLineToSourceLine, mapProjectMethodLineToSourceLine } from './parser';
+import { mapFunctionLineToSourceLine, mapProjectMethodLineToSourceLine, clearFileContentCache, getFileLines } from './parser';
 
 const LOG_PATH = path.join(os.tmpdir(), '4d-testing-extension.log');
 function dbg(msg: string) {
@@ -145,6 +145,20 @@ export async function startTestRun(
 
         await new Promise<void>(resolve => {
             const makeProcess = spawn('make', cmdArgs, { cwd: workspaceFolder });
+            let cancelled = false;
+
+            const cancelSub = token.onCancellationRequested(() => {
+                cancelled = true;
+                dbg('cancellation requested — killing make process');
+                run.appendOutput('Test run cancelled.\r\n');
+                makeProcess.kill('SIGTERM');
+                setTimeout(() => {
+                    if (!makeProcess.killed) {
+                        dbg('SIGTERM did not kill process, sending SIGKILL');
+                        makeProcess.kill('SIGKILL');
+                    }
+                }, 3000);
+            });
 
             // Collect raw buffers and decode once at the end so multi-byte
             // characters don't get split across chunk boundaries.
@@ -168,7 +182,13 @@ export async function startTestRun(
             });
 
             makeProcess.on('close', async (code) => {
-                dbg(`close fired (exit=${code}, stdoutEnded=${stdoutEnded}, bytes=${stdoutBytes})`);
+                cancelSub.dispose();
+                dbg(`close fired (exit=${code}, cancelled=${cancelled}, stdoutEnded=${stdoutEnded}, bytes=${stdoutBytes})`);
+
+                if (cancelled) {
+                    resolve();
+                    return;
+                }
                 try {
                     // The testing component writes to outputPath relative to
                     // the project root. Resolve against the workspace.
@@ -235,6 +255,8 @@ export async function startTestRun(
         });
     }
 
+    clearFileContentCache();
+    findFilesCache.clear();
     dbg('calling run.end()');
     run.end();
     dbg('run.end() returned');
@@ -243,24 +265,14 @@ export async function startTestRun(
 async function fileHasAttributeLine(uri: vscode.Uri | undefined): Promise<boolean> {
     if (!uri) return false;
     try {
-        const rawContent = await vscode.workspace.fs.readFile(uri);
-        let content = new TextDecoder('utf-8').decode(rawContent);
-        // Strip UTF-8 BOM if present
-        if (content.charCodeAt(0) === 0xFEFF) {
-            content = content.slice(1);
-        }
-        const firstLine = content.split(/\r?\n/, 1)[0] ?? '';
-        return firstLine.trimStart().startsWith('//%attributes');
+        const lines = await getFileLines(uri);
+        return lines.length > 0 && lines[0].trimStart().startsWith('//%attributes');
     } catch {
         return false;
     }
 }
 
 async function findErrorSourceUri(err: any): Promise<vscode.Uri | undefined> {
-    // Try to find the .4dm file for the method/location reported in the error.
-    // err fields like `method` or `text` may contain a method or class name,
-    // possibly wrapped in extra prose. Pull every identifier-like token and try
-    // each as a potential filename.
     const candidates = new Set<string>();
     const collect = (raw: unknown) => {
         if (typeof raw !== 'string') return;
@@ -272,10 +284,8 @@ async function findErrorSourceUri(err: any): Promise<vscode.Uri | undefined> {
     collect(err?.message);
 
     for (const name of candidates) {
-        const matches = await vscode.workspace.findFiles(`**/${name}.4dm`, '**/node_modules/**', 1);
-        if (matches.length > 0) {
-            return matches[0];
-        }
+        const uri = await findDmFileByName(name);
+        if (uri) return uri;
     }
 
     return undefined;
@@ -439,6 +449,11 @@ async function handleResults(
         ));
     }
 
+    const targetMap = new Map<string, vscode.TestItem>();
+    for (const t of testTargets) {
+        targetMap.set(`${t.suite}.${t.func}`, t.item);
+    }
+
     let processed = 0;
     let unmatched = 0;
     let i = 0;
@@ -447,11 +462,9 @@ async function handleResults(
     for (const testResult of results.testResults) {
         i++;
         const id = `${testResult.suite}.${testResult.name}`;
-        const target = testTargets.find(
-            t => t.suite === testResult.suite && t.func === testResult.name
-        );
+        const targetItem = targetMap.get(id);
 
-        if (!target) {
+        if (!targetItem) {
             unmatched++;
             dbg(`[${i}/${totalCount}] UNMATCHED ${id} (passed=${testResult.passed} skipped=${testResult.skipped} runtimeErrors=${testResult.runtimeErrors?.length ?? 0})`);
             run.appendOutput(
@@ -463,7 +476,7 @@ async function handleResults(
         const t0 = Date.now();
         try {
             dbg(`[${i}/${totalCount}] start ${id} (assertions=${testResult.assertions?.length ?? 0} runtimeErrors=${testResult.runtimeErrors?.length ?? 0} passed=${testResult.passed} skipped=${testResult.skipped})`);
-            await processTestResult(testResult, target.item, run, controller);
+            await processTestResult(testResult, targetItem, run, controller);
             processed++;
             const elapsed = Date.now() - t0;
             if (elapsed > 100) {
@@ -479,7 +492,7 @@ async function handleResults(
             );
             // Ensure the parent test doesn't stay in "running" forever.
             run.errored(
-                target.item,
+                targetItem,
                 new vscode.TestMessage(
                     `Internal error while processing result: ${err?.message ?? err}`
                 ),
