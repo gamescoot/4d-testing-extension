@@ -125,7 +125,7 @@ export async function startTestRun(
         try {
             fs.mkdirSync(path.dirname(absOutputPath), { recursive: true });
         } catch { /* ignore */ }
-        const cmdArgs = ['test', 'format=json', `outputPath=${relOutputPath}`];
+        const cmdArgs = ['test', 'format=json', 'callchain=true', `outputPath=${relOutputPath}`];
 
         // If profile has tag, include tag param
         const profileTag = (request.profile?.label?.match(/Run '(.+)' tests/) || [])[1];
@@ -213,6 +213,13 @@ export async function startTestRun(
                     const startedAt = Date.now();
                     await handleResults(results, run, testTargets, controller);
                     dbg(`handleResults finished in ${Date.now() - startedAt}ms`);
+
+                    const stdout = Buffer.concat(chunks).toString('utf8').trim();
+                    if (stdout) {
+                        for (const line of stdout.split(/\r?\n/)) {
+                            run.appendOutput(line + '\r\n');
+                        }
+                    }
 
                     try { fs.unlinkSync(resolvedPath); } catch { /* ignore */ }
                 } catch (err: any) {
@@ -340,22 +347,96 @@ async function handleResults(
     testTargets: { suite: string; func: string; item: vscode.TestItem }[],
     controller: vscode.TestController
 ) {
+    controller.items.delete('__external_errors__');
+
     if (!results.testResults) return;
 
     if (results.hasGlobalErrors && results.globalErrors?.length > 0) {
-        run.appendOutput('\r\n⚠ Global Runtime Errors (outside test processes):\r\n');
+        // Deduplicate errors by their signature (code + location + line + message)
+        const uniqueErrors: { err: any; count: number }[] = [];
+        const seen = new Map<string, number>();
         for (const err of results.globalErrors) {
+            const key = `${err.code ?? '?'}|${err.text || ''}|${err.line ?? ''}|${err.message || err.method || ''}`;
+            const idx = seen.get(key);
+            if (idx !== undefined) {
+                uniqueErrors[idx].count++;
+            } else {
+                seen.set(key, uniqueErrors.length);
+                uniqueErrors.push({ err, count: 1 });
+            }
+        }
+
+        const totalCount = results.globalErrors.length;
+        const extErrorsItem = controller.createTestItem(
+            '__external_errors__',
+            `External Errors (${totalCount})`
+        );
+
+        const childItems: vscode.TestItem[] = [];
+        for (let i = 0; i < uniqueErrors.length; i++) {
+            const { err, count } = uniqueErrors[i];
+            const msg = err.message || err.method || `Error ${err.code}`;
+            const suffix = count > 1 ? ` (x${count})` : '';
+
+            const sourceUri = await findErrorSourceUri(err);
+            const child = controller.createTestItem(
+                `__external_errors__/${i}`,
+                `[${err.code ?? '?'}] ${msg}${suffix}`,
+                sourceUri
+            );
+
+            if (sourceUri && err.line != null) {
+                const errText = typeof err.text === 'string' ? err.text : '';
+                let zeroBasedLine: number | null = null;
+                if (errText && errText.includes('.')) {
+                    zeroBasedLine = await mapFunctionLineToSourceLine(sourceUri, errText, err.line);
+                } else {
+                    zeroBasedLine = await mapProjectMethodLineToSourceLine(sourceUri, err.line);
+                }
+                if (zeroBasedLine === null) {
+                    const hasAttr = await fileHasAttributeLine(sourceUri);
+                    zeroBasedLine = (hasAttr ? err.line + 1 : err.line) - 1;
+                }
+                const pos = new vscode.Position(Math.max(0, zeroBasedLine), 0);
+                child.range = new vscode.Range(pos, pos);
+            }
+
+            childItems.push(child);
+        }
+
+        extErrorsItem.children.replace(childItems);
+        controller.items.add(extErrorsItem);
+
+        for (let i = 0; i < childItems.length; i++) {
+            const { err, count } = uniqueErrors[i];
             const code = err.code ?? '?';
-            const process = err.processNumber ?? '?';
             const method = err.text || 'Unknown location';
             const msg = err.message || err.method || '';
             const line = err.line != null ? ` line ${err.line}` : '';
-            run.appendOutput(`  [${code}] Process ${process}: ${method}${line}\r\n`);
-            if (msg) {
-                run.appendOutput(`    ${msg}\r\n`);
+            const countNote = count > 1 ? `\nOccurred ${count} times` : '';
+            const detail = `[${code}] ${method}${line}${msg ? '\n' + msg : ''}${countNote}`;
+            const message = new vscode.TestMessage(detail);
+
+            if (childItems[i].uri && childItems[i].range) {
+                message.location = new vscode.Location(childItems[i].uri!, childItems[i].range!);
             }
+
+            const callChain = parseCallChainJSON(err.callChainJSON);
+            if (callChain.length > 0) {
+                const stackFrames: vscode.TestMessageStackFrame[] = [];
+                for (const frame of callChain) {
+                    stackFrames.push(await resolveCallFrame(frame));
+                }
+                message.stackTrace = stackFrames;
+            }
+
+            run.started(childItems[i]);
+            run.errored(childItems[i], message);
         }
-        run.appendOutput('\r\n');
+        run.started(extErrorsItem);
+        run.errored(extErrorsItem, new vscode.TestMessage(
+            `${totalCount} external runtime error(s) detected (${uniqueErrors.length} unique)`
+        ));
     }
 
     let processed = 0;

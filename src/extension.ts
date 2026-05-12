@@ -1,8 +1,26 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { startTestRun } from './startTestRun';
 import { updateFromDisk, testData } from './testTree';
 
+const LOG_PATH = path.join(os.tmpdir(), '4d-testing-extension.log');
+function dbg(msg: string) {
+    const line = `[${new Date().toISOString()}] [discovery] ${msg}\n`;
+    try { fs.appendFileSync(LOG_PATH, line); } catch { /* ignore */ }
+}
+
+function countItems(collection: vscode.TestItemCollection): number {
+    let n = 0;
+    collection.forEach(() => n++);
+    return n;
+}
+
+let discoveryGeneration = Date.now();
+
 export function activate(context: vscode.ExtensionContext) {
+    dbg('activate() called');
     const controller = vscode.tests.createTestController(
         'fourDTestController',
         '4D Tests'
@@ -68,26 +86,41 @@ export function activate(context: vscode.ExtensionContext) {
         (request, token) => runTests(controller, request, token)
     );
 
-    // Discover tests when workspace opens or folders change
+    // Discover tests when workspace opens, then clear stale results
     if (vscode.workspace.workspaceFolders) {
-        vscode.workspace.workspaceFolders.forEach(folder =>
-            discoverTests(controller, folder.uri, getOrCreateTag)
-        );
+        dbg(`initial discovery for ${vscode.workspace.workspaceFolders.length} workspace folder(s)`);
+        const folders = [...vscode.workspace.workspaceFolders];
+        (async () => {
+            for (const folder of folders) {
+                dbg(`  folder: ${folder.uri.fsPath}`);
+                await discoverTests(controller, folder.uri, getOrCreateTag);
+            }
+            dbg(`invalidateTestResults() — root items: ${countItems(controller.items)}`);
+            controller.invalidateTestResults();
+        })();
+    } else {
+        dbg('no workspace folders found');
     }
 
     vscode.workspace.onDidChangeWorkspaceFolders(event => {
+        dbg(`onDidChangeWorkspaceFolders: added=${event.added.length} removed=${event.removed.length}`);
         event.added.forEach(folder =>
             discoverTests(controller, folder.uri, getOrCreateTag)
         );
     });
 
     vscode.workspace.onDidChangeTextDocument(event => {
-        discoverTests(controller, event.document.uri, getOrCreateTag);
+        if (event.document.uri.fsPath.endsWith('.4dm')) {
+            dbg(`onDidChangeTextDocument: ${event.document.uri.fsPath} (root items: ${countItems(controller.items)})`);
+            controller.invalidateTestResults();
+            discoverTests(controller, event.document.uri, getOrCreateTag);
+        }
     });
 
     vscode.workspace.onDidCreateFiles(event => {
         event.files.forEach(file => {
             if (file.fsPath.endsWith('.4dm')) {
+                dbg(`onDidCreateFiles: ${file.fsPath}`);
                 discoverTests(controller, file, getOrCreateTag);
             }
         });
@@ -100,20 +133,33 @@ async function discoverTests(
     rootUri: vscode.Uri,
     getOrCreateTag: (name: string) => vscode.TestTag
 ) {
+    discoveryGeneration++;
+    const gen = discoveryGeneration;
+    dbg(`discoverTests called (gen=${gen}): ${rootUri.fsPath}`);
     try {
         let files: vscode.Uri[];
         if (rootUri.toString().endsWith('.4dm')) {
             files = [rootUri];
+            dbg(`  single file mode`);
         } else {
             const pattern = new vscode.RelativePattern(
                 vscode.Uri.joinPath(rootUri, 'Project', 'Sources', 'Classes'),
                 '*Test.4dm'
             );
             files = await vscode.workspace.findFiles(pattern);
+            dbg(`  found ${files.length} *Test.4dm files`);
         }
 
+        // Remove all existing root items so VS Code drops cached result state
+        const staleIds: string[] = [];
+        controller.items.forEach(item => staleIds.push(item.id));
+        for (const id of staleIds) {
+            controller.items.delete(id);
+        }
+        dbg(`  cleared ${staleIds.length} stale root items`);
+
         for (const file of files) {
-            const id = file.fsPath;
+            const id = `g${gen}:${file.fsPath}`;
             const testItem = controller.createTestItem(
                 id,
                 file.path.split('/').pop()!,
@@ -121,10 +167,14 @@ async function discoverTests(
             );
             controller.items.add(testItem);
             testData.set(testItem, { kind: 'file' });
+            dbg(`  added file item: ${file.path.split('/').pop()!} (children before updateFromDisk: ${countItems(testItem.children)})`);
 
-            await updateFromDisk(controller, testItem, getOrCreateTag);
+            await updateFromDisk(controller, testItem, getOrCreateTag, gen);
+            dbg(`  after updateFromDisk: ${file.path.split('/').pop()!} has ${countItems(testItem.children)} children`);
         }
-    } catch (err) {
+        dbg(`  root items after discovery: ${countItems(controller.items)}`);
+    } catch (err: any) {
+        dbg(`  ERROR in discoverTests: ${err?.message ?? err}`);
         console.error('Error discovering 4D tests:', err);
     }
 }
