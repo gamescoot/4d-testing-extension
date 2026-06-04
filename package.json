@@ -16,6 +16,16 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "4D Testing Extension",
+      "properties": {
+        "4d-testing-extension.tool4dPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the tool4D (or 4D) executable. Passed as the TOOL4D parameter to make. Leave empty to use the Makefile default."
+        }
+      }
+    },
     "commands": [
       {
         "command": "4d-testing-extension.runTests",
