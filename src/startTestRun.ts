@@ -127,6 +127,11 @@ export async function startTestRun(
         } catch { /* ignore */ }
         const cmdArgs = ['test', 'format=json', `outputPath=${relOutputPath}`];
 
+        const tool4dPath = vscode.workspace.getConfiguration('4d-testing-extension').get<string>('tool4dPath');
+        if (tool4dPath) {
+            cmdArgs.push(`TOOL4D=${tool4dPath}`);
+        }
+
         // If profile has tag, include tag param
         const profileTag = (request.profile?.label?.match(/Run '(.+)' tests/) || [])[1];
         if (profileTag) {
