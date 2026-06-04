@@ -1,5 +1,26 @@
 import * as vscode from 'vscode';
 
+const fileContentCache = new Map<string, string[]>();
+
+export async function getFileLines(fileUri: vscode.Uri): Promise<string[]> {
+    const key = fileUri.toString();
+    const cached = fileContentCache.get(key);
+    if (cached) return cached;
+
+    const rawContent = await vscode.workspace.fs.readFile(fileUri);
+    let content = new TextDecoder('utf-8').decode(rawContent);
+    if (content.charCodeAt(0) === 0xFEFF) {
+        content = content.slice(1);
+    }
+    const lines = content.split('\n');
+    fileContentCache.set(key, lines);
+    return lines;
+}
+
+export function clearFileContentCache() {
+    fileContentCache.clear();
+}
+
 const headingRe = /^.*?(?:\/\/ #tags: (.*))?\n?Function (test_.*)\(.*$/;
 
 export const parseMarkdown = (
@@ -60,10 +81,7 @@ export async function mapFunctionLineToSourceLine(
     lineOffset: number
 ): Promise<number | null> {
     try {
-        // Read the source file
-        const rawContent = await vscode.workspace.fs.readFile(fileUri);
-        const content = new TextDecoder().decode(rawContent);
-        const lines = content.split('\n');
+        const lines = await getFileLines(fileUri);
 
         // Extract the method name from the fully qualified name
         // Format is typically "ClassName.methodName" or just "methodName"
@@ -131,12 +149,7 @@ export async function mapProjectMethodLineToSourceLine(
     lineOffset: number
 ): Promise<number | null> {
     try {
-        const rawContent = await vscode.workspace.fs.readFile(fileUri);
-        let content = new TextDecoder('utf-8').decode(rawContent);
-        if (content.charCodeAt(0) === 0xFEFF) {
-            content = content.slice(1);
-        }
-        const lines = content.split('\n');
+        const lines = await getFileLines(fileUri);
 
         // 4D skips a leading //%attributes line — start counting after it.
         let startIndex = 0;
